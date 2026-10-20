@@ -23,7 +23,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -69,7 +69,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -81,7 +81,7 @@ jobs:
     name: Docker image (deploy build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # The root Dockerfile is the API image this repository deploys.
       # Building it here means a broken COPY path, a stale base tag or a Go
       # build failure inside the multi-stage image fails a pull request
