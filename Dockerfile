@@ -28,7 +28,11 @@ COPY --from=build /out/tera-server /app/tera-server
 USER tera
 EXPOSE 8080
 
+# The listen port comes from $PORT when the platform injects one (Helipod,
+# Render, Heroku); TERA_ADDR stays the local default. Probing $PORT keeps the
+# check honest when the platform picks a port other than 8080 - a hardcoded
+# 8080 would mark the container unhealthy and turn into a restart loop.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
+    CMD wget -qO- "http://127.0.0.1:${PORT:-8080}/healthz" || exit 1
 
 ENTRYPOINT ["/app/tera-server"]

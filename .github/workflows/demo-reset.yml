@@ -1,0 +1,98 @@
+name: Scheduled demo reset
+
+# Rewinds the public demo tenant to the pristine seed every day at 01:30 UTC,
+# then proves the reset worked by logging in and running a few accounting
+# invariants through the real HTTP API.
+on:
+  schedule:
+    - cron: "30 1 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: demo-reset
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    name: Reset demo tenant + smoke checks
+    runs-on: ubuntu-latest
+    env:
+      DEMO_URL: ${{ vars.DEMO_URL }}
+      DEMO_RESET_SECRET: ${{ secrets.DEMO_RESET_SECRET }}
+      DEMO_EMAIL: ${{ vars.DEMO_EMAIL }}
+      DEMO_PASSWORD: ${{ secrets.DEMO_PASSWORD }}
+    steps:
+      - name: Check configuration
+        if: env.DEMO_URL == '' || env.DEMO_RESET_SECRET == '' || env.DEMO_EMAIL == '' || env.DEMO_PASSWORD == ''
+        run: |
+          echo "::warning::Set DEMO_URL / DEMO_EMAIL repo variables and DEMO_RESET_SECRET / DEMO_PASSWORD secrets to enable the scheduled reset."
+          exit 1
+      - name: Normalise DEMO_URL
+        run: |
+          # Trim any trailing slash once, here, so every later step can append a
+          # path to $DEMO_URL directly. Without this, "$DEMO_URL/healthz" becomes
+          # "//healthz" whenever DEMO_URL is configured with a trailing slash.
+          DEMO_URL="${DEMO_URL%/}"
+          echo "DEMO_URL=$DEMO_URL" >> "$GITHUB_ENV"
+      - name: Wake the service (free tier cold start)
+        run: |
+          for i in $(seq 1 12); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$DEMO_URL/healthz" || true)
+            [ "$code" = "200" ] && break
+            echo "attempt $i: HTTP $code — sleeping 10s"; sleep 10
+          done
+          curl -fsS "$DEMO_URL/healthz" | grep -q '"status":"ok"'
+      - name: Reset demo tenant
+        run: |
+          curl -fsS -X POST "$DEMO_URL/internal/demo/reset" \
+            -H "X-Demo-Reset-Secret: $DEMO_RESET_SECRET" | grep -q '"reset":true'
+      - name: Smoke checks — login, balance sheet, journal integrity
+        shell: python3
+        run: |
+          import json, os, urllib.request
+
+          base = os.environ["DEMO_URL"].rstrip("/")
+
+          def call(method, path, token=None, body=None):
+              req = urllib.request.Request(base + path, method=method)
+              req.add_header("Content-Type", "application/json")
+              if token:
+                  req.add_header("Authorization", "Bearer " + token)
+              data = json.dumps(body).encode() if body is not None else None
+              with urllib.request.urlopen(req, data) as res:
+                  assert res.status == 200, (path, res.status)
+                  payload = res.read()
+                  return json.loads(payload) if payload else None
+
+          auth = call("POST", "/api/v1/auth/login", body={
+              "email": os.environ["DEMO_EMAIL"], "password": os.environ["DEMO_PASSWORD"]})["data"]
+          token = auth["token"]
+
+          # The balance sheet must satisfy the accounting equation using its own
+          # totals, independent of period defaults.
+          bs = call("GET", "/api/v1/reports/balance-sheet", token)["data"]
+          assert bs["totalAssets"] == bs["totalLiabilities"] + bs["totalEquity"] + bs.get("currentPeriodProfit", 0), (
+              "balance sheet does not reconcile",
+              bs["totalAssets"], bs["totalLiabilities"], bs["totalEquity"], bs.get("currentPeriodProfit", 0))
+
+          journals = call("GET", "/api/v1/journal-entries?status=Posted&perPage=100", token)
+          assert journals["meta"]["total"] > 0, "no posted journals after reset"
+
+          # Draft -> post a trivial balanced journal through the real workflow.
+          draft = call("POST", "/api/v1/journal-entries", token, body={
+              "date": "2026-01-15", "memo": "Reset smoke check (draft)",
+              "status": "Draft",
+              "lines": [
+                  {"accountCode": "1100", "debit": 1000, "credit": 0, "memo": "cash"},
+                  {"accountCode": "4100", "debit": 0, "credit": 1000, "memo": "revenue"},
+              ]})["data"]
+          call("POST", "/api/v1/journal-entries/%d/post" % draft["id"], token)
+          entry = call("GET", "/api/v1/journal-entries/%d" % draft["id"], token)["data"]
+          assert entry["status"] == "Posted", entry["status"]
+          debits = sum(l["debit"] for l in entry["lines"])
+          credits = sum(l["credit"] for l in entry["lines"])
+          assert debits == credits and debits > 0, "posted journal is not balanced"
+
+          call("POST", "/api/v1/auth/logout", token)
+          print("Demo reset verified: login OK, balance sheet reconciles, journal post OK")
+

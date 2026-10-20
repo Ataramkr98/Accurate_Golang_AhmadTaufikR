@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# The CI workflow only ever needs to read the repository. No job below pushes,
+# creates releases, or writes to issues, so the default token is downgraded to
+# read-only for the whole workflow.
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (build Â· vet Â· test Â· race)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race detector)
+        run: go test -race ./...
+      - name: govulncheck
+        # Pinned to a fixed release rather than @latest: @latest silently
+        # changes the scanner under a security workflow, so a red run can never
+        # be reproduced and a green run may have used an untested scanner.
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  backend-postgres:
+    name: Backend (PostgreSQL integration)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tera
+          POSTGRES_PASSWORD: tera_test_password
+          POSTGRES_DB: tera_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U tera -d tera_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://tera:tera_test_password@localhost:5432/tera_test?sslmode=disable
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Contract suite (memory + PostgreSQL)
+        run: go test -race -count=1 ./internal/repository/... ./internal/service/...
+
+  docker:
+    name: Docker image (deploy build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The root Dockerfile is the API image this repository deploys.
+      # Building it here means a broken COPY path, a stale base tag or a Go
+      # build failure inside the multi-stage image fails a pull request
+      # instead of the deploy.
+      # Plain `docker build` is used deliberately: no push, no registry
+      # credentials, and the only required permission is contents:read.
+      - name: Build deploy image
+        run: docker build -t tera:ci .

@@ -1,0 +1,23 @@
+version: 2
+
+updates:
+  # Go module dependencies, resolved from backend/go.mod.
+  - package-ecosystem: gomod
+    directory: /backend
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Frontend dependencies, resolved from accurate-web/package-lock.json.
+  - package-ecosystem: npm
+    directory: /accurate-web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # The CI and scheduled-reset workflows themselves.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

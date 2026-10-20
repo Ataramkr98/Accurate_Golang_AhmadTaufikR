@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.exe
+
+# Secrets — never commit real credentials
+.env
+.env.local
+.env.*.local
+# Catches .env.production / .env.staging and every other variant. The negation
+# below keeps the committed templates tracked.
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Vite cache
+.vite/
+node_modules/.vite/
+
+# Logs
+*.log
+
+# Browser-automation debug artifacts
+.playwright-cli/
+output/playwright/
+.probe/
+
+# Agent and isolated-worktree state
+# .kilo/worktrees/<name>/ is a full duplicate checkout of this repository plus
+# a .git worktree-pointer file, so it must never be commit-eligible. A bare
+# ".worktrees/" pattern does not match it — the directory prefix has to be named.
+.kilo/
+.workbuddy-ai/
+.superpowers/
+.worktrees/
+
+# Staging clones of the two GitHub repositories (scripts/sync-to-github.ps1)
+.sync/
+
+# Test reports and coverage
+coverage/
+playwright-report/
+test-results/

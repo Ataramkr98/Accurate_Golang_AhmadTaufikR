@@ -1,0 +1,1168 @@
+openapi: 3.0.3
+info:
+  title: Tera Accounting API
+  version: 1.0.0
+  description: |
+    JSON API for the Tera Accounting portfolio release: a double-entry
+    accounting demo covering the chart of accounts, journals, sales invoices
+    with payments, customers, branch-scoped financial reports, an illustrative
+    tax summary, and an audit trail.
+
+    Conventions
+    -----------
+    * Every response uses the envelope `{ data, meta?, errors? }`.
+    * Lists accept `page` (default 1), `perPage` (default 25, maximum 100),
+      `q`, and an allowlisted `sort` / `order`; `meta` reports
+      `{ page, perPage, total }`.
+    * `branchId` scopes a report or list to one branch owned by the caller's
+      company; omitting it means all branches.
+    * Dates are inclusive ISO dates: `period=YYYY-MM` (dashboard),
+      `asOf=YYYY-MM-DD` (position statements), `from` / `to=YYYY-MM-DD`
+      (activity statements).
+    * Money is integer IDR; there are no fractional amounts.
+    * This is an illustrative portfolio demo — not filing software and not
+      tax advice.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: /
+    description: Same-origin deployment (SPA served by the API container)
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: Health
+  - name: Auth
+  - name: Company
+  - name: Branches
+  - name: Accounts
+  - name: Journals
+  - name: Invoices
+  - name: Customers
+  - name: Reports
+  - name: Audit
+  - name: Internal
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Process is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  revision: { type: string, example: development }
+
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe (checks the database)
+      security: []
+      responses:
+        "200":
+          description: Database is reachable
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ready }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in with email and password
+      description: |
+        Returns a 24-hour opaque bearer token; only its SHA-256 hash is stored.
+        Five failed attempts per IP/e-mail pair within 15 minutes are rejected
+        with RATE_LIMITED.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, format: password }
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          token: { type: string }
+                          user: { $ref: "#/components/schemas/User" }
+                          company: { $ref: "#/components/schemas/Company" }
+                          branches:
+                            type: array
+                            items: { $ref: "#/components/schemas/Branch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "429":
+          description: Too many failed attempts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current session
+      responses:
+        "204": { description: Session revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user, company, and branches
+      responses:
+        "200":
+          description: Session context
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user: { $ref: "#/components/schemas/User" }
+                          company: { $ref: "#/components/schemas/Company" }
+                          branches:
+                            type: array
+                            items: { $ref: "#/components/schemas/Branch" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/auth/profile:
+    put:
+      tags: [Auth]
+      summary: Update the display name
+      description: Only the name can change; the release has one owner account per company.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string, example: "Ahmad" }
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Create a company with an owner account (development only)
+      description: |
+        Available only when TERA_ENABLE_SIGNUP=true; hosted demos answer 403
+        FORBIDDEN because only the seeded demo login is public.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, companyName]
+              properties:
+                name: { type: string, example: "Ahmad" }
+                email: { type: string, format: email }
+                password:
+                  type: string
+                  description: At least 8 characters with upper, lower, and digit.
+                companyName: { type: string }
+      responses:
+        "201": { description: Company and owner created }
+        "403": { description: Signup disabled in this environment }
+        "409": { description: E-mail already registered }
+
+  /api/v1/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a one-use password reset link (development only)
+      description: |
+        Available only when TERA_ENABLE_PASSWORD_RESET=true. Tokens are
+        single-use and expiring; delivered through the Mailer interface
+        (which logs the link in the demo deployment).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202": { description: Accepted (always, to avoid account enumeration) }
+        "403": { description: Password recovery disabled in this environment }
+
+  /api/v1/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Complete a password reset
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, password]
+              properties:
+                token: { type: string }
+  /api/v1/company:
+    put:
+      tags: [Company]
+      summary: Update the company profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, sakMode]
+              properties:
+                name: { type: string }
+                npwp: { type: string, example: "01.234.567.8-901.000" }
+                sakMode: { type: string, enum: [emkm, psak_umum] }
+                isPkp: { type: boolean }
+                address: { type: string }
+                businessType: { type: string }
+      responses:
+        "200":
+          description: Updated company
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /api/v1/branches:
+    get:
+      tags: [Branches]
+      summary: List branches
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Query"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [name] }
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: Branch page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeWithMeta" }
+    post:
+      tags: [Branches]
+      summary: Create a branch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "201": { description: Branch created }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /api/v1/branches/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    put:
+      tags: [Branches]
+      summary: Rename a branch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "200": { description: Branch updated }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Branches]
+      summary: Delete a branch
+      description: Rejected when it is the last remaining branch.
+      responses:
+  /api/v1/accounts:
+    get:
+      tags: [Accounts]
+      summary: List chart-of-accounts entries
+      description: Balances are derived from posted journal lines, never cached.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Query"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [code, name, type, balance] }
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: Account page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeWithMeta" }
+    post:
+      tags: [Accounts]
+      summary: Create an account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code, name, type]
+              properties:
+                code: { type: string, example: "6300" }
+                name: { type: string }
+                type:
+                  type: string
+                  enum: [asset, liability, equity, revenue, expense]
+                parentId: { type: integer, description: Optional header account id }
+                isActive: { type: boolean }
+      responses:
+        "201": { description: Account created }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /api/v1/accounts/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    put:
+      tags: [Accounts]
+      summary: Update an account
+      description: System accounts keep their code and type.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                isActive: { type: boolean }
+      responses:
+        "200": { description: Account updated }
+        "403": { description: System account code/type change rejected }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Accounts]
+      summary: Delete an account
+      responses:
+        "204": { description: Account deleted }
+        "403": { description: System accounts cannot be deleted }
+
+  /api/v1/accounts/{id}/ledger:
+    get:
+      tags: [Accounts]
+      summary: General ledger for one account
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      responses:
+        "200":
+          description: Ledger rows with a running balance
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          accountId: { type: integer }
+                          accountCode: { type: string }
+                          accountName: { type: string }
+                          openingBalance: { type: integer }
+                          totalDebit: { type: integer }
+                          totalCredit: { type: integer }
+                          closingBalance: { type: integer }
+                          rows:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                date: { type: string, format: date }
+                                ref: { type: string }
+                                memo: { type: string }
+                                debit: { type: integer }
+                                credit: { type: integer }
+  /api/v1/journal-entries:
+    get:
+      tags: [Journals]
+      summary: List journal entries
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Query"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [number, date, memo, status, total] }
+        - $ref: "#/components/parameters/Order"
+        - name: status
+          in: query
+          schema: { type: string, enum: [Draft, Posted] }
+        - name: branchId
+          in: query
+          schema: { type: integer, description: Scope to one branch }
+        - name: from
+          in: query
+          schema: { type: string, format: date, description: Inclusive start date }
+        - name: to
+          in: query
+          schema: { type: string, format: date, description: Inclusive end date }
+      responses:
+        "200":
+          description: Journal page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeWithMeta" }
+    post:
+      tags: [Journals]
+      summary: Create a journal entry (defaults to Draft)
+      description: |
+        Lines must balance (total debits equal total credits) and each line
+        must have either a debit or credit. When status is "Posted" the entry
+        is committed atomically with numbering, persistence, and audit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JournalInput" }
+      responses:
+        "201": { description: Journal entry created }
+        "422": { $ref: "#/components/responses/Validation" }
+        "409": { description: Journal does not balance }
+
+  /api/v1/journal-entries/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Journals]
+      summary: Get a single journal entry
+      responses:
+        "200":
+          description: Journal entry with lines
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Journals]
+      summary: Replace a draft journal entry
+      description: Drafts only; posted journals are immutable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/JournalInput" }
+      responses:
+        "200": { description: Journal entry updated }
+        "403": { description: Posted journals cannot be edited }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Journals]
+      summary: Delete a draft journal entry
+      description: Drafts only; posted journals are immutable.
+      responses:
+        "204": { description: Journal entry deleted }
+        "403": { description: Posted journals cannot be deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/journal-entries/{id}/post:
+    post:
+      tags: [Journals]
+      summary: Post a draft journal entry
+      description: |
+        Posts a draft journal and commits the posting atomically with
+        numbering, persistence, and an audit entry. Posted journals are
+        immutable thereafter.
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      responses:
+        "200": { description: Journal entry posted }
+  /api/v1/invoices:
+    get:
+      tags: [Invoices]
+      summary: List sales invoices
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Query"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [number, date, dueDate, customer, status, total] }
+        - $ref: "#/components/parameters/Order"
+        - name: status
+          in: query
+          schema: { type: string, enum: [Draft, Issued, PartiallyPaid, Paid, Overdue] }
+        - name: branchId
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Invoice page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeWithMeta" }
+    post:
+      tags: [Invoices]
+      summary: Create a draft invoice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InvoiceInput" }
+      responses:
+        "201": { description: Invoice created }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /api/v1/invoices/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Invoices]
+      summary: Get a single invoice
+      responses:
+        "200":
+          description: Invoice with lines
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Invoices]
+      summary: Replace a draft invoice
+      description: Drafts only; issued invoices are immutable.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InvoiceInput" }
+      responses:
+        "200": { description: Invoice updated }
+        "403": { description: Issued invoices cannot be edited }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Invoices]
+      summary: Delete a draft invoice
+      description: Drafts only; issued invoices cannot be deleted.
+      responses:
+        "204": { description: Invoice deleted }
+        "403": { description: Issued invoices cannot be deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/invoices/{id}/issue:
+    post:
+      tags: [Invoices]
+      summary: Issue a draft invoice
+      description: |
+        Transitions a draft to Issued by posting an atomic
+        receivable/revenue/tax journal. The first journal entry's number
+        is assigned inside the transaction.
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      responses:
+        "200": { description: Invoice issued }
+        "403": { description: Only drafts can be issued }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/invoices/{id}/payments:
+    get:
+      tags: [Invoices]
+      summary: List payments for an invoice
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [date, amount] }
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: Payment page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeWithMeta" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Invoices]
+      summary: Record a payment against an invoice
+      description: |
+        Posts a cash receipt journal (debit cash, credit receivable) and
+        creates a payment record atomically. Payment cannot exceed the
+        outstanding balance; status is derived from the remaining amount.
+      parameters:
+        - $ref: "#/components/parameters/PathID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/InvoicePaymentInput" }
+      responses:
+  /api/v1/customers:
+    get:
+      tags: [Customers]
+      summary: List customers
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Query"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [name, email] }
+        - $ref: "#/components/parameters/Order"
+      responses:
+        "200":
+          description: Customer page
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeWithMeta" }
+    post:
+      tags: [Customers]
+      summary: Create a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CustomerInput" }
+      responses:
+        "201": { description: Customer created }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /api/v1/customers/{id}:
+    parameters:
+      - $ref: "#/components/parameters/PathID"
+    get:
+      tags: [Customers]
+      summary: Get a single customer
+      responses:
+        "200":
+          description: Customer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Customers]
+      summary: Update a customer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CustomerInput" }
+      responses:
+        "200": { description: Customer updated }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Customers]
+      summary: Delete a customer
+      responses:
+        "204": { description: Customer deleted }
+        "403": { description: Cannot delete a customer with issued invoices }
+  /api/v1/dashboard:
+    get:
+      tags: [Reports]
+      summary: Dashboard KPIs and recent activity
+      parameters:
+        - name: branchId
+          in: query
+          schema: { type: integer, description: Scope to one branch }
+        - name: period
+          in: query
+          schema: { type: string, example: "2026-09", description: Inclusive month (YYYY-MM) }
+      responses:
+        "200":
+          description: Dashboard summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+
+  /api/v1/reports/balance-sheet:
+    get:
+      tags: [Reports]
+      summary: Balance sheet (position statement)
+      parameters:
+        - name: branchId
+          in: query
+          schema: { type: integer }
+        - name: asOf
+          in: query
+          schema: { type: string, format: date, description: Inclusive through date (YYYY-MM-DD) }
+      responses:
+        "200":
+          description: Balance sheet
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+
+  /api/v1/reports/profit-loss:
+    get:
+      tags: [Reports]
+      summary: Profit and loss (income statement)
+      parameters:
+        - name: branchId
+          in: query
+          schema: { type: integer }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Profit and loss
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+
+  /api/v1/reports/cash-flow:
+    get:
+      tags: [Reports]
+      summary: Cash flow statement
+      parameters:
+        - name: branchId
+          in: query
+          schema: { type: integer }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Cash flow
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+
+  /api/v1/reports/ar-aging:
+    get:
+      tags: [Reports]
+      summary: Receivables aging report
+      parameters:
+        - name: branchId
+          in: query
+          schema: { type: integer }
+        - name: asOf
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: AR aging matrix
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+
+  /api/v1/tax/summary:
+    get:
+      tags: [Reports]
+      summary: Illustrative tax summary
+      description: |
+        Reads the VAT liability (account 2200) and PPh 21 withholding (account
+        2210) from posted journal lines and output VAT from issued invoices.
+        Illustrative position — not tax advice.
+      parameters:
+        - name: branchId
+          in: query
+          schema: { type: integer }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Tax summary
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Envelope" }
+
+  /api/v1/audit-logs:
+    get:
+      tags: [Audit]
+      summary: List audit log entries
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+        - $ref: "#/components/parameters/Query"
+        - name: sort
+          in: query
+          schema: { type: string, enum: [createdAt, action, entity] }
+        - $ref: "#/components/parameters/Order"
+  /internal/demo/reset:
+    post:
+      tags: [Internal]
+      summary: Reset the shared demo tenant (secret-protected)
+      description: |
+        Wipes all demo data and re-seeds the portfolio tenant. Only available
+        when DEMO_RESET_SECRET is configured. Authenticated with the
+        X-Demo-Reset-Secret header, not a Bearer token.
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+            description: Empty JSON object
+      headers:
+        X-Demo-Reset-Secret:
+          schema: { type: string }
+          description: Deployment secret matching DEMO_RESET_SECRET
+      responses:
+        "200": { description: Demo tenant reset }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { description: Demo reset is not configured }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: Opaque token (SHA-256 hashed in storage)
+
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        data:
+          oneOf:
+            - type: object
+            - type: array
+            - type: string
+            - type: integer
+            - type: boolean
+            - type: "null"
+        meta:
+          $ref: "#/components/schemas/Meta"
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIError"
+
+    EnvelopeWithMeta:
+      allOf:
+        - $ref: "#/components/schemas/Envelope"
+        - type: object
+          required: [data, meta]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/Account"
+            meta:
+              $ref: "#/components/schemas/Meta"
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        errors:
+          type: array
+          items:
+            $ref: "#/components/schemas/APIError"
+
+    Meta:
+      type: object
+      properties:
+        page: { type: integer, example: 1 }
+        perPage: { type: integer, example: 25 }
+        total: { type: integer, example: 42 }
+
+    APIError:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+
+    User:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        companyId: { type: integer, example: 1 }
+        email: { type: string, format: email, example: "demo@tera.dev" }
+        name: { type: string, example: "Portfolio Owner" }
+
+    Company:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        name: { type: string, example: "PT Tera Akuntansi" }
+        npwp: { type: string }
+        sakMode: { type: string, enum: [emkm, psak_umum], example: "emkm" }
+        isPkp: { type: boolean }
+        address: { type: string }
+        businessType: { type: string }
+
+    Branch:
+      type: object
+      properties:
+        id: { type: integer, example: 1 }
+        companyId: { type: integer, example: 1 }
+        name: { type: string, example: "Kantor Pusat" }
+
+    Account:
+      type: object
+      properties:
+        id: { type: integer }
+        companyId: { type: integer }
+        code: { type: string, example: "1200" }
+        name: { type: string, example: "Piutang Usaha" }
+        type:
+          type: string
+          enum: [asset, liability, equity, revenue, expense]
+        parentId: { type: integer, description: Parent group account }
+        isActive: { type: boolean }
+        balance: { type: integer, description: Current balance from posted journals (IDR) }
+
+    JournalLine:
+      type: object
+      properties:
+        id: { type: integer }
+        journalEntryId: { type: integer }
+        accountId: { type: integer }
+        debit: { type: integer }
+        credit: { type: integer }
+        memo: { type: string }
+
+    JournalLineInput:
+      type: object
+      required: [accountId]
+      properties:
+        accountId: { type: integer }
+        accountCode: { type: string, description: Alternative to accountId }
+        debit: { type: integer, minimum: 0, example: 50000 }
+        credit: { type: integer, minimum: 0, example: 0 }
+        memo: { type: string }
+
+    JournalInput:
+      type: object
+
+    JournalEntry:
+      type: object
+      properties:
+        id: { type: integer }
+        companyId: { type: integer }
+        branchId: { type: integer }
+        number: { type: string, example: "JRN-001" }
+        date: { type: string, format: date }
+        status: { type: string, enum: [Draft, Posted] }
+        sourceType: { type: string, enum: [Manual, Invoice, Payment] }
+        sourceId: { type: integer }
+        memo: { type: string }
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/JournalLine"
+        createdAt: { type: string, format: date-time }
+
+    JournalSummary:
+      type: object
+      properties:
+        id: { type: integer }
+        branchId: { type: integer }
+        number: { type: string }
+        date: { type: string, format: date }
+        source: { type: string }
+        memo: { type: string }
+        status: { type: string, enum: [Draft, Posted] }
+        total: { type: integer }
+
+    InvoiceLine:
+      type: object
+      properties:
+        id: { type: integer }
+        invoiceId: { type: integer }
+        name: { type: string }
+        qty: { type: integer }
+        price: { type: integer }
+        discountPercent: { type: integer }
+        subtotal: { type: integer }
+
+    InvoiceLineInput:
+      type: object
+      required: [name, qty, price]
+      properties:
+        name: { type: string }
+        qty: { type: integer, minimum: 1, example: 2 }
+        price: { type: integer, minimum: 0, example: 25000 }
+        discountPercent: { type: integer, minimum: 0, maximum: 100, example: 0 }
+
+    InvoiceInput:
+      type: object
+      required: [customerId, date, dueDate, branchId, lines]
+      properties:
+        customerId: { type: integer, example: 1 }
+        customerName: { type: string, description: Fallback when customerId not yet created }
+        date: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        notes: { type: string }
+        branchId: { type: integer }
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/InvoiceLineInput"
+
+    Invoice:
+      type: object
+      properties:
+        id: { type: integer }
+        companyId: { type: integer }
+        branchId: { type: integer }
+        number: { type: string, example: "INV-001" }
+        customerId: { type: integer }
+        customerName: { type: string }
+        date: { type: string, format: date }
+        dueDate: { type: string, format: date }
+        status: { type: string, enum: [Draft, Issued, PartiallyPaid, Paid, Overdue] }
+        notes: { type: string }
+        subtotal: { type: integer }
+        taxAmount: { type: integer }
+        total: { type: integer }
+        paidAmount: { type: integer }
+        outstanding: { type: integer }
+        lines:
+          type: array
+          items:
+            $ref: "#/components/schemas/InvoiceLine"
+        createdAt: { type: string, format: date-time }
+
+    InvoicePayment:
+      type: object
+      properties:
+        id: { type: integer }
+        companyId: { type: integer }
+        invoiceId: { type: integer }
+        cashAccountId: { type: integer }
+        date: { type: string, format: date }
+        amount: { type: integer }
+        notes: { type: string }
+        journalId: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    InvoicePaymentInput:
+      type: object
+      required: [date, amount, cashAccountId]
+      properties:
+        date: { type: string, format: date }
+        amount: { type: integer, minimum: 1 }
+        cashAccountId: { type: integer, description: An active asset (cash/bank) account }
+        notes: { type: string }
+
+    Customer:
+      type: object
+      properties:
+        id: { type: integer }
+        companyId: { type: integer }
+        name: { type: string, example: "PT ABC" }
+        email: { type: string, format: email }
+        phone: { type: string }
+        address: { type: string }
+
+    CustomerInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        address: { type: string }
+
+      required: [date, branchId, lines]
+      properties:
+        date: { type: string, format: date, example: "2026-09-15" }
+        branchId: { type: integer, example: 1 }
+        memo: { type: string }
+        status: { type: string, enum: [Draft, Posted], example: "Draft" }
+        sourceType: { type: string, enum: [Manual, Invoice, Payment] }
+        sourceId: { type: integer }
+        lines:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/JournalLineInput"
+
+      responses:
+        "200":
+          description: Audit log page (newest first by default)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/EnvelopeWithMeta" }
+
+        "404": { $ref: "#/components/responses/NotFound" }
+
+        "201": { description: Payment recorded, returns the updated invoice }
+        "403": { description: Invoice must be issued first }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+        "409": { description: Already posted or does not balance }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+                                balance: { type: integer }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+        "204": { description: Branch deleted }
+        "422": { description: A company must keep at least one branch }
+
+                password:
+                  type: string
+                  description: At least 8 characters with upper, lower, and digit.
+      responses:
+        "204": { description: Password updated }
+        "403": { description: Password recovery disabled in this environment }
+        "422": { $ref: "#/components/responses/Validation" }
+
+                  revision: { type: string, example: development }
+        "503":
+          description: Database is not ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
