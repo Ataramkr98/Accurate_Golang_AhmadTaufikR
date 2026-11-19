@@ -2,7 +2,9 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -71,6 +73,45 @@ func TestHealthzUsesEnvelopeAndKeepsStatusOKLiteral(t *testing.T) {
 	if !ok || data["status"] != "ok" {
 		t.Fatalf("healthz is not enveloped: %s", recorder.Body.String())
 	}
+}
+
+type unavailableStore struct {
+	repository.Store
+}
+
+func (unavailableStore) Ready(context.Context) error {
+	return errors.New("private database failure")
+}
+
+func TestReadyzReflectsStoreWithoutExposingItsError(t *testing.T) {
+	store := repository.NewMemoryStore()
+	ready := NewServer(store).Router()
+	unavailable := NewServer(unavailableStore{store}).Router()
+
+	t.Run("ready", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		ready.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		data, ok := envelopeTestJSON(t, recorder)["data"].(map[string]any)
+		if recorder.Code != http.StatusOK || !ok || data["status"] != "ready" {
+			t.Fatalf("readiness = %d %s", recorder.Code, recorder.Body.String())
+		}
+	})
+
+	t.Run("unavailable", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		unavailable.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+		body := recorder.Body.String()
+		envelopeTestJSON(t, recorder)
+		if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(body, `"code":"NOT_READY"`) || strings.Contains(body, "private database failure") {
+			t.Fatalf("readiness = %d %s", recorder.Code, body)
+		}
+
+		liveness := httptest.NewRecorder()
+		unavailable.ServeHTTP(liveness, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+		if liveness.Code != http.StatusOK {
+			t.Fatalf("liveness depends on readiness: %d %s", liveness.Code, liveness.Body.String())
+		}
+	})
 }
 
 // An unmatched API path and a wrong method both answer in the envelope. Go's

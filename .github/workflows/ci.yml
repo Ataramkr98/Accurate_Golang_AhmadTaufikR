@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   backend:
-    name: Backend (build Â· vet Â· test Â· race)
+    name: Backend (build · vet · test · race)
     runs-on: ubuntu-latest
     defaults:
       run:

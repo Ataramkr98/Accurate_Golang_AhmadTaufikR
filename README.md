@@ -5,7 +5,7 @@ balance, tenant-isolated persistence. The service layer refuses to post an unbal
 entry, and every balance, report and KPI is derived from posted journal lines rather
 than stored in a cache.
 
-Go 1.25, PostgreSQL, and the standard library only — no web framework, no ORM.
+Go 1.26, PostgreSQL, and the standard library HTTP stack — no web framework or ORM.
 
 ---
 
@@ -128,7 +128,7 @@ CI runs both jobs on every push.
 
 ## Running locally
 
-Requires Go 1.25 or newer.
+Requires Go 1.26.11 or newer.
 
 ```bash
 git clone https://github.com/Ataramkr98/Accurate_Golang_AhmadTaufikR.git
