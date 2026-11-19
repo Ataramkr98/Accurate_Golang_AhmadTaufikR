@@ -804,13 +804,8 @@ func (p *PostgresStore) ListJournalEntries(companyID uint, status string) []doma
 
 // ReadJournalEntries is the fallible form of ListJournalEntries.
 //
-// Cost: 1 + N queries, one for the headers and one per entry for its lines.
-// That N+1 is deliberate and unchanged: the caller (the list handler) filters,
-// sorts and paginates the whole tenant in memory, so it already pays for every
-// row, and collapsing the lines into one IN (...) query would change row
-// ordering guarantees that the ledger reports depend on. idx_journal_lines_entry
-// (migration 001) keeps the per-entry lookup an index scan. Revisit with a
-// keyset-paginated query if a tenant ever outgrows a single in-memory page.
+// Headers and lines take at most two round trips, regardless of entry count.
+// Header ordering is unchanged; each entry's lines stay in insertion order.
 func (p *PostgresStore) ReadJournalEntries(companyID uint, status string) ([]domain.JournalEntry, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -834,6 +829,8 @@ func (p *PostgresStore) ReadJournalEntries(companyID uint, status string) ([]dom
 	defer rows.Close()
 
 	entries := []domain.JournalEntry{}
+	ids := []int64{}
+	index := map[uint]int{}
 	for rows.Next() {
 		var e domain.JournalEntry
 		if err := rows.Scan(
@@ -842,6 +839,9 @@ func (p *PostgresStore) ReadJournalEntries(companyID uint, status string) ([]dom
 		); err != nil {
 			return nil, fmt.Errorf("list journal entries: %w", err)
 		}
+		e.Lines = []domain.JournalLine{}
+		index[e.ID] = len(entries)
+		ids = append(ids, int64(e.ID))
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -849,12 +849,27 @@ func (p *PostgresStore) ReadJournalEntries(companyID uint, status string) ([]dom
 	}
 	rows.Close()
 
-	for i := range entries {
-		lines, err := p.readJournalLines(ctx, entries[i].ID)
-		if err != nil {
-			return nil, err
+	if len(entries) == 0 {
+		return entries, nil
+	}
+	// IDs come exclusively from the tenant- and status-scoped header query.
+	lineRows, err := p.pool.Query(ctx, `SELECT id, journal_entry_id, account_id, debit, credit, memo
+		FROM journal_lines WHERE journal_entry_id = ANY($1::bigint[])
+		ORDER BY journal_entry_id ASC, id ASC`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list journal lines: %w", err)
+	}
+	defer lineRows.Close()
+	for lineRows.Next() {
+		var line domain.JournalLine
+		if err := lineRows.Scan(&line.ID, &line.JournalEntryID, &line.AccountID, &line.Debit, &line.Credit, &line.Memo); err != nil {
+			return nil, fmt.Errorf("list journal lines: %w", err)
 		}
-		entries[i].Lines = lines
+		i := index[line.JournalEntryID]
+		entries[i].Lines = append(entries[i].Lines, line)
+	}
+	if err := lineRows.Err(); err != nil {
+		return nil, fmt.Errorf("list journal lines: %w", err)
 	}
 	return entries, nil
 }
@@ -1113,11 +1128,7 @@ func (p *PostgresStore) ListInvoices(companyID uint) []domain.Invoice {
 
 // ReadInvoices is the fallible form of ListInvoices.
 //
-// Cost: 1 + N queries, one header query plus one per invoice for its lines.
-// Kept as-is for the same reason as ReadJournalEntries: the caller filters,
-// sorts and paginates the whole tenant in memory, and idx_invoice_lines_invoice
-// keeps each per-invoice lookup an index scan. A batched IN (...) fetch would
-// need its own ordering guarantee to keep line order stable per document.
+// Like journals, invoices and their ordered lines take at most two round trips.
 func (p *PostgresStore) ReadInvoices(companyID uint) ([]domain.Invoice, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1131,6 +1142,8 @@ func (p *PostgresStore) ReadInvoices(companyID uint) ([]domain.Invoice, error) {
 	defer rows.Close()
 
 	invoices := []domain.Invoice{}
+	ids := []int64{}
+	index := map[uint]int{}
 	for rows.Next() {
 		var inv domain.Invoice
 		if err := rows.Scan(
@@ -1139,6 +1152,9 @@ func (p *PostgresStore) ReadInvoices(companyID uint) ([]domain.Invoice, error) {
 		); err != nil {
 			return nil, fmt.Errorf("list invoices: %w", err)
 		}
+		inv.Lines = []domain.InvoiceLine{}
+		index[inv.ID] = len(invoices)
+		ids = append(ids, int64(inv.ID))
 		invoices = append(invoices, inv)
 	}
 	if err := rows.Err(); err != nil {
@@ -1146,12 +1162,26 @@ func (p *PostgresStore) ReadInvoices(companyID uint) ([]domain.Invoice, error) {
 	}
 	rows.Close()
 
-	for i := range invoices {
-		lines, err := p.readInvoiceLines(ctx, invoices[i].ID)
-		if err != nil {
-			return nil, err
+	if len(invoices) == 0 {
+		return invoices, nil
+	}
+	lineRows, err := p.pool.Query(ctx, `SELECT id, invoice_id, name, qty, price, discount_percent, subtotal
+		FROM invoice_lines WHERE invoice_id = ANY($1::bigint[])
+		ORDER BY invoice_id ASC, id ASC`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("list invoice lines: %w", err)
+	}
+	defer lineRows.Close()
+	for lineRows.Next() {
+		var line domain.InvoiceLine
+		if err := lineRows.Scan(&line.ID, &line.InvoiceID, &line.Name, &line.Qty, &line.Price, &line.DiscountPercent, &line.Subtotal); err != nil {
+			return nil, fmt.Errorf("list invoice lines: %w", err)
 		}
-		invoices[i].Lines = lines
+		i := index[line.InvoiceID]
+		invoices[i].Lines = append(invoices[i].Lines, line)
+	}
+	if err := lineRows.Err(); err != nil {
+		return nil, fmt.Errorf("list invoice lines: %w", err)
 	}
 	return invoices, nil
 }

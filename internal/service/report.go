@@ -342,8 +342,12 @@ func (s *ReportService) DashboardScoped(companyID, branchID uint, period string)
 		periodFrom = month.Format(dateLayout)
 		periodTo = month.AddDate(0, 1, -1).Format(dateLayout)
 	}
-	positionAccounts := s.scopedAccounts(companyID, branchID, "", periodTo)
-	activityAccounts := s.scopedAccounts(companyID, branchID, periodFrom, periodTo)
+	// Reuse the same ledger for the position, period activity and chart. Each
+	// reload costs database round trips even when the tenant has few entries.
+	accounts := s.store.ListAccounts(companyID)
+	journals := s.store.ListJournalEntries(companyID, "")
+	positionAccounts := scopedAccountBalances(accounts, journals, branchID, "", periodTo)
+	activityAccounts := scopedAccountBalances(accounts, journals, branchID, periodFrom, periodTo)
 
 	var cash int64
 	var profit int64
@@ -401,7 +405,7 @@ func (s *ReportService) DashboardScoped(companyID, branchID uint, period string)
 	// Passing the period-filtered slice to cashFlowSeries (the earlier
 	// behaviour) meant the six-month axis could only ever have one non-empty
 	// bucket, so the chart was structurally incapable of showing a trend.
-	scoped := filterJournalEntries(s.store.ListJournalEntries(companyID, ""), branchID, "", "")
+	scoped := filterJournalEntries(journals, branchID, "", "")
 	entries := filterJournalEntries(scoped, 0, periodFrom, periodTo)
 
 	recent := make([]RecentTransaction, 0, min(6, len(entries)))
@@ -646,13 +650,24 @@ func min(a, b int) int {
 // Date boundaries are inclusive and blank boundaries are unbounded.
 func (s *ReportService) scopedAccounts(companyID, branchID uint, from, to string) []domain.Account {
 	accounts := s.store.ListAccounts(companyID)
+	entries := s.store.ListJournalEntries(companyID, domain.JournalStatusPosted)
+	return scopedAccountBalances(accounts, entries, branchID, from, to)
+}
+
+// scopedAccountBalances leaves the source accounts intact so multiple date
+// ranges can be projected from a single ledger load.
+func scopedAccountBalances(source []domain.Account, entries []domain.JournalEntry, branchID uint, from, to string) []domain.Account {
+	accounts := make([]domain.Account, len(source))
+	copy(accounts, source)
 	index := make(map[uint]int, len(accounts))
 	for i := range accounts {
 		accounts[i].Balance = 0
 		index[accounts[i].ID] = i
 	}
-	entries := filterJournalEntries(s.store.ListJournalEntries(companyID, domain.JournalStatusPosted), branchID, from, to)
-	for _, entry := range entries {
+	for _, entry := range filterJournalEntries(entries, branchID, from, to) {
+		if entry.Status != domain.JournalStatusPosted {
+			continue
+		}
 		for _, line := range entry.Lines {
 			i, ok := index[line.AccountID]
 			if !ok {
