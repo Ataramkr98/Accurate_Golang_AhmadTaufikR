@@ -100,12 +100,6 @@ func (s *Server) Router() http.Handler {
 	}
 	final.Handle("/api/", Auth(s.tokens, s.store)(authed))
 	final.HandleFunc("/healthz", requireMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {
-		// Liveness answers in the standard envelope like every other endpoint,
-		// which nests the pair under "data":
-		//   {"data":{"revision":"...","status":"ok"}}
-		// The nightly demo-reset workflow and the hosting probes grep the raw
-		// body for the literal "status":"ok"; it is still there, and every
-		// consumer that understands the envelope keeps working.
 		OK(w, map[string]string{"status": "ok", "revision": buildRevision()})
 	}))
 	final.HandleFunc("/readyz", requireMethod(http.MethodGet, func(w http.ResponseWriter, r *http.Request) {

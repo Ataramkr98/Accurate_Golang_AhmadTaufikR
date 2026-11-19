@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"tera/internal/domain"
 	"tera/internal/repository"
@@ -64,6 +65,7 @@ func TestInvoiceDraftCanBeEditedButIssuedInvoiceIsImmutable(t *testing.T) {
 
 func TestInvoiceIssuePostsExactlyOnceAndLocksDocument(t *testing.T) {
 	store, invoices, input := newInvoiceFixture(t)
+	input.DueDate = time.Now().AddDate(0, 0, 30).Format(dateLayout)
 	invoice, err := invoices.Create(1, 1, input)
 	if err != nil {
 		t.Fatalf("create invoice: %v", err)
